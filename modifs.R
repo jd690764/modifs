@@ -25,6 +25,9 @@ parser$add_argument("-f", "--file",
                     help = 'csv list of uid values. If this is used, no other param is required and a summary file is also generated.' )
 parser$add_argument("-r", "--threshold", default = 0L,
                     help = "Threshold score to filter out bad quality peptides.")
+parser$add_argument("-c", "--cuteff", default = FALSE,
+                    help = "Calculate missed cuts?")
+
 
 args          <- parser$parse_args()
 
@@ -101,7 +104,7 @@ if( 'file' %in% names(args) & !is.null(args[['file']])){
     makeSummary3( groups, outdir, args )
     print( paste( 'paths: ', paths ))
     # combine datasets into a single report
-    dset <- assembleDataset( paths, outdir )
+    dset <- assembleDataset( paths, outdir, args )
     if(length(fname) > 0){
         fname <- paste0(outdir, '/', fname )
     }
