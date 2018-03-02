@@ -97,7 +97,7 @@ retrieveArgs <- function( args ){
     return( args )
 }
 
-assembleDataset <- function( paths, outdir ){
+assembleDataset <- function( paths, outdir, args ){
 
     mods_all   <- data.table()
     allPos_all <- data.table()
@@ -108,8 +108,9 @@ assembleDataset <- function( paths, outdir ){
         # assumed that the file is one of '_mods_summary.tsv" files
         file   <- paste0( outdir, '/', path, '/', path, '_mods_summary.tsv')
         pept   <- fread(file)[!is.na(pept), .(dset, pept, symbol, descr, start, end, nseq)]
-        mods   <- fread(file)[ is.na(pept), .(dset, symbol, descr, modif,
-                                              pos, residue, mod_count, all_count, missed, unmod_missed)]
+        mods   <- fread(file)[ is.na(pept), c()]
+        mods   <- fread(file)[ is.na(pept), -c('pept', 'start', 'end', 'nseq', 'score')]
+
         mods_all <- bind_rows(mods_all, mods)
         print('start countAllPositions')
         start.time <- Sys.time()
@@ -148,8 +149,13 @@ assembleDataset <- function( paths, outdir ){
     modifs[ , all_count := NULL ]
 
     # last, convert table from long to wide
-    modifs <- dcast(modifs, symbol + descr + pos + residue + modif ~ dset,
-                    value.var = c('mod_count', 'count', 'percent_mod', 'missed', 'unmod_missed'))
+    if( args$cuteff == TRUE ){
+        cols <- c('mod_count', 'count', 'percent_mod', 'missed', 'unmod_missed')
+    } else {
+        cols <- c('mod_count', 'count', 'percent_mod')
+    }
+
+    modifs <- dcast(modifs, symbol + descr + pos + residue + modif ~ dset, value.var = cols)
 
     # sort the columns by dataset
     cnames <- data.table(expts = dsets$dset, cnames = colnames(modifs)[6:ncol(modifs)])[order(expts)]
@@ -576,7 +582,7 @@ detCoverage <- function( outfile, sumfile ){
 
     # get max isoform length for each gene symbol
     con_sql  <- dbConnect( RMySQL::MySQL(), group = "tcga" )
-    sql      <- "select symbol, max(len) len from ncbiprot where acc like 'NP_%' group by eid"
+    sql      <- "select e.symbol, max(len) len from ncbiprots n, entrez e where n.eid = e.eid group by e.eid"
     query    <- dbSendQuery( con_sql, sql )
     entr_len <- as.data.table(fetch( query, n = -1 ))
     dbClearResult( query )
@@ -987,9 +993,9 @@ makeSummary3 <- function( gs, outdir, args ){ # input is a hash of arrays
                 res <- as.data.table(bind_cols(data.table(dset = rep(g, nrow(res))), res))
 
                 fwrite( res, summaryFile, sep = '\t' )
-                fwrite( res[is.na(pept), .(dset, symbol, descr, modif, pos, residue, score, missed,
-                                           unmod_missed, mod_count, all_count)],
-                             summaryDFile, sep = '\t' )
+                dt <- res[is.na(pept), .(dset, symbol, descr, modif, pos, residue, score, missed,
+                                         unmod_missed, mod_count, all_count)]
+                fwrite( dt, summaryDFile, sep = '\t' )
             }
         }
         if( (!file.exists( cov_file) || args$overwrite )){
