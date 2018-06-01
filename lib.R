@@ -986,6 +986,7 @@ makeSummary3 <- function( gs, outdir, args ){ # input is a hash of arrays
                 # correct coordinates of the baits for the N-terminal fragment of the tag
                 if( nrow(res[ symbol == args$bait]) > 0 & args$offset > 0 ){
                     res[ symbol == args$bait & grepl('Puro_', descr), start := as.integer(start) - args$offset ]
+                    res[ symbol == args$bait & grepl('Puro_', descr), end := as.integer(end) - args$offset ]                    
                     res[ symbol == args$bait & grepl('Puro_', descr), pos := as.integer(pos) - as.integer(args$offset) ]
                     res <- res[ pos > -1 | is.na(pos), ]
                 }
