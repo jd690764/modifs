@@ -11,6 +11,7 @@ suppressPackageStartupMessages( library(DBI))
 library('parallel')
 library('doParallel')
 library('stringr')
+require(readxl)
 
 pogodir       <- '/usr/local/share/bin/'
 sheetToRead   <- 'Spectra'
@@ -72,8 +73,9 @@ pogo       <- data.table( taxid = c(10090, 9606), cmd = c('./PoGo_mm', './PoGo')
 retrieveArgs <- function( args ){
     con_sql  <- dbConnect( RMySQL::MySQL(), group = "tcga" )
     sql      <- paste0("select bait_symbol, tag_length, ff_folder, taxid
-                       from network_sample
-                       where id = '", trim(args$uid), "'" )
+                       from network_dproc p, network_psample s
+                       where p.expid_id = s.expid_id
+                       and p.id = ", trim(args$uid) )
     print(paste('sql=', sql))
     query    <- dbSendQuery( con_sql, sql )
     rs       <- as.data.table(fetch( query, n = -1 ))
@@ -155,7 +157,7 @@ assembleDataset <- function( paths, outdir, args ){
         cols <- c('mod_count', 'count', 'percent_mod')
     }
 
-    modifs <- dcast(modifs, symbol + descr + pos + residue + modif ~ dset, value.var = cols)
+    modifs <- dcast(modifs, symbol + descr + pos + residue + modif ~ dset, value.var = cols, fun.aggregate = sum)
 
     # sort the columns by dataset
     cnames <- data.table(expts = dsets$dset, cnames = colnames(modifs)[6:ncol(modifs)])[order(expts)]
@@ -986,7 +988,7 @@ makeSummary3 <- function( gs, outdir, args ){ # input is a hash of arrays
                 # correct coordinates of the baits for the N-terminal fragment of the tag
                 if( nrow(res[ symbol == args$bait]) > 0 & args$offset > 0 ){
                     res[ symbol == args$bait & grepl('Puro_', descr), start := as.integer(start) - args$offset ]
-                    res[ symbol == args$bait & grepl('Puro_', descr), end := as.integer(end) - args$offset ]                    
+                    res[ symbol == args$bait & grepl('Puro_', descr), end := as.integer(end) - args$offset ]
                     res[ symbol == args$bait & grepl('Puro_', descr), pos := as.integer(pos) - as.integer(args$offset) ]
                     res <- res[ pos > -1 | is.na(pos), ]
                 }
@@ -1105,16 +1107,17 @@ trim <- function (x){
 }
 
 create_summary_file <- function( dir, outfile ){
+    # creates a SUMS-like summary file from fraction files in a folder
     library(openxlsx)
     if(!dir.exists(dir)){
         print( paste0('Please, check the directory: ', dir))
         return()
     }
-    if(length(list.files(path = dir, pattern = '^[a-zA-Z0-9].*\\.xlsx$')) == 0){
+    if(length(list.files(path = dir, pattern = '^[a-zA-Z1-9]+.*\\.xlsx$')) == 0){
         print( paste( dir, 'contains no excel files'))
         return()
     }
-    ffiles <- list.files(path = dir, pattern = '.*\\.xlsx')
+    ffiles <- list.files(path = dir, pattern = '^[a-zA-Z1-9]+.*\\.xlsx')
     count  <- 1
     sum_data <- data.table()
     cnames <- c('Rank Number', 'Protein Name')
@@ -1122,7 +1125,8 @@ create_summary_file <- function( dir, outfile ){
         print( paste('read', ff))
         cnames <- c(cnames, ff)
         #wb <- loadWorkbook(paste0(dir, '/', ff))
-        ff_data <- as.data.table(readWorksheetFromFile(paste0(dir, '/', ff), sheet = 'Proteins'))
+        #ff_data <- as.data.table(readWorksheetFromFile(paste0(dir, '/', ff), sheet = 'Proteins'))
+        ff_data <- read_excel(paste0(dir, '/', ff), sheet = 'Proteins') %>% as.data.table()
         #ff_data <- as.data.table(read.xlsx(paste0(dir, '/', ff), sheet = 'Proteins', cols = c(2,7)))
         # only care about columns 'Description' and '# of spectra' (2, 7)
         ff_data <- ff_data[, c(2,7),with = FALSE]
@@ -1140,7 +1144,7 @@ create_summary_file <- function( dir, outfile ){
         }
     }
     sum_data[, MAX := apply(sum_data[,2:ncol(sum_data)], 1, max, na.rm = T)]
-    sum_data[, SUM := apply(sum_data[,2:ncol(sum_data)], 1, sum, na.rm = T)]
+    sum_data[, SUM := apply(sum_data[,2:(ncol(sum_data)-1)], 1, sum, na.rm = T)]
     cnames <- c(cnames, 'MAX', 'SUM')
     sum_data[, 'Rank Number' := rank(-MAX, ties.method = 'first')]
     sum_data <- sum_data[order(`Rank Number`)]
@@ -1149,7 +1153,8 @@ create_summary_file <- function( dir, outfile ){
     #createSheet( wb, name = 'GLOBAL')
     #writeWorksheet(wb, sum_data, sheet = 'GLOBAL' )
     #saveWorkbook(wb)
-    writeWorksheetToFile(outfile, sum_data, 'GLOBAL' )
+    #writeWorksheetToFile(outfile, sum_data, 'GLOBAL' )
+    write.xlsx(sum_data, outfile, sheetName = 'GLOBAL', row.names = FALSE)
     return( sum_data )
 }
 
