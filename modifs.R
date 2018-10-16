@@ -20,9 +20,9 @@ parser$add_argument("-w", '--overwrite', default = FALSE,
 parser$add_argument("-t", "--taxid", default = 9606,
                     help = 'taxid of the organism' )
 parser$add_argument("-u", "--uid",
-                    help = 'uid of the experiment. If this is used, no other param is required.' )
+                    help = 'dproc.id of the experiment. If this is used, no other param is required.' )
 parser$add_argument("-f", "--file",
-                    help = 'csv list of uid values. If this is used, no other param is required and a summary file is also generated.' )
+                    help = 'csv list of dproc.id values. If this is used, no other param is required and a summary file is also generated.' )
 parser$add_argument("-r", "--threshold", default = 0L,
                     help = "Threshold score to filter out bad quality peptides.")
 parser$add_argument("-c", "--cuteff", default = FALSE,
@@ -69,10 +69,22 @@ if( class( args$taxid ) == 'character' & nchar(args$taxid) > 0 ){
     args$taxid <- as.integer(args$taxid)
 }
 if( 'uid' %in% names(args) & !is.null(args[['uid']])){
-    # get params from the database table
-    args <- retrieveArgs( args )
-}
-if( 'file' %in% names(args) & !is.null(args[['file']])){
+
+    if(grepl(',', args$uid)){
+        uids_string <- gsub(' ', '', trimws(args$uid, which = 'b'))
+        uids <- as.integer(str_split(uids_string, ',', simplify = T))
+        for(uid in uids){
+            args$uid <- uid
+            # get params from the database table
+            args <- retrieveArgs( args )
+
+            l           <- findExpts( args, files, groups)
+            files       <- l$files
+            groups      <- l$groups
+            makeSummary3( groups, outdir, args )
+        }
+    }
+} else if( 'file' %in% names(args) & !is.null(args[['file']])){
     cwd  <- getwd()
     parfile <- args$file
     print(parfile)
