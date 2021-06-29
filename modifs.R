@@ -1,6 +1,15 @@
 #!/usr/bin/env Rscript
-source( '/usr/local/share/R/lib.R' )
-#source('/mnt/driveB/jdemeter/usr/R/lib.R')
+if(Sys.info()['sysname'] == 'Darwin'){
+    source('~/mnt/driveB/jdemeter/usr/R/lib.R')
+    datadir <- "~/mnt/driveB/jdemeter/msrepo/fractionFiles/"
+} else if(Sys.info()['sysname'] == 'Windows'){
+    source('Z:/usr/R/lib.R')
+    datadir <- "Z:/msrepo/fractionFiles/"
+} else {
+    source( '/usr/local/share/R/lib.R' )
+    datadir <- "/srv/msrepo/fractionFiles/"
+
+}
 options(warn=-1)
 # create parser object
 parser <- ArgumentParser()
@@ -27,13 +36,10 @@ parser$add_argument("-r", "--threshold", default = 0L,
                     help = "Threshold score to filter out bad quality peptides.")
 parser$add_argument("-c", "--cuteff", default = FALSE,
                     help = "Calculate missed cuts?")
-
+parser$add_argument("-s", "--usepogo", default = FALSE,
+                    help = "Use PoGo?")
 
 args          <- parser$parse_args()
-
-datadir       <- "/srv/msrepo/fractionFiles/"
-#datadir       <- "/mnt/driveB/jdemeter/msrepo/fractionFiles/"
-
 files         <- character( )
 groups        <- hash( ) # expt (dir) -> files
 
@@ -42,7 +48,7 @@ setwd(datadir)
 makeDupMap()
 ftsv        <-'/tmp/out.tsv'
 outdir      <- paste0(datadir, 'PTMs')
-matrixFile  <- '/mnt/driveB/jdemeter/ms_fraction_data/result.txt'
+matrixFile  <- '~/mnt/driveB/jdemeter/ms_fraction_data/result.txt'
 
 #args$path <- 'Ras'
 #args$bait <- 'KRAS'
@@ -51,7 +57,8 @@ matrixFile  <- '/mnt/driveB/jdemeter/ms_fraction_data/result.txt'
 #args$taxid <- '9606'
 #args$overwrite <- TRUE
 #args$uid <- '2038' # just use the id column value
-#args$file <- '/usr/local/share/R/t.txt'
+# args$file <- '~/mnt/driveB/jdemeter/usr/R/zmynd8.txt'
+#args$file <- 'Z:/usr/R/zmynd8.txt'
 print( str(args))
 if( class( args$keep ) == 'character' & nchar(args$keep) > 0 ){
     args$keep <- as.logical(args$keep)
@@ -68,26 +75,34 @@ if( class( args$overwrite ) == 'character' & nchar(args$overwrite) > 0 ){
 if( class( args$taxid ) == 'character' & nchar(args$taxid) > 0 ){
     args$taxid <- as.integer(args$taxid)
 }
-if( 'uid' %in% names(args) & !is.null(args[['uid']])){
-
-    if(grepl(',', args$uid)){
-        uids_string <- gsub(' ', '', trimws(args$uid, which = 'b'))
+if( class( args$usepogo ) == 'character' & nchar(args$usepogo) > 0 ){
+    args$usepogo <- as.logical(args$usepogo)
+}
+if('uid' %in% names(args) & !is.null(args[['uid']])) {
+    uids_string <- gsub(' ', '', trimws(args$uid, which = 'b'))
+    if (grepl(',', args$uid)) {
         uids <- as.integer(str_split(uids_string, ',', simplify = T))
-        for(uid in uids){
-            args$uid <- uid
-            # get params from the database table
-            args <- retrieveArgs( args )
-
-            l           <- findExpts( args, files, groups)
-            files       <- l$files
-            groups      <- l$groups
-            makeSummary3( groups, outdir, args )
-        }
+    } else {
+        uids <- uids_string
+    }
+    args$baits   <- hash()
+    args$offsets <- hash()
+    for (uid in uids) {
+        args$uid <- uid
+        print(paste('working on id:', uid))
+        # get params from the database table
+        args                   <- retrieveArgs(args)
+        l                      <- findExpts(args, files, groups)
+        files                  <- l$files
+        groups                 <- l$groups
+        args$baits[[l$expt]]   <- args$bait
+        args$offsets[[l$expt]] <- args$offset
+        makeSummary3(groups, outdir, args)
     }
 } else if( 'file' %in% names(args) & !is.null(args[['file']])){
     cwd  <- getwd()
     parfile <- args$file
-    print(parfile)
+    print(paste0('parfile=', parfile))
     if( file.exists(parfile)){
         con  <- file(parfile, open = "r" )
         line <- readLines(con, n = 1)
@@ -106,13 +121,19 @@ if( 'uid' %in% names(args) & !is.null(args[['uid']])){
     }
     paths <- character()
     for( uid in uids ){
-        args$uid <- uid
-        args     <- retrieveArgs(args)
-        paths    <- c(paths, args$path)
-        l        <- findExpts( args, files, groups)
-        files    <- l$files
-        groups   <- l$groups
+        args$uid               <- uid
+        args                   <- retrieveArgs(args)
+        paths                  <- c(paths, args$path)
+        l                      <- findExpts( args, files, groups)
+        files                  <- l$files
+        groups                 <- l$groups
+        args$baits[[l$expt]]   <- args$bait
+        args$offsets[[l$expt]] <- args$offset
     }
+    saveRDS(groups, '/usr/local/share/R/groups.rds')
+    saveRDS(args, '/usr/local/share/R/args.rds')
+    # quit()
+
     makeSummary3( groups, outdir, args )
     print( paste( 'paths: ', paths ))
     # combine datasets into a single report
@@ -125,9 +146,11 @@ if( 'uid' %in% names(args) & !is.null(args[['uid']])){
     }
     fwrite( dset, fname, sep = '\t')
 } else {
-    l           <- findExpts( args, files, groups)
-    files       <- l$files
-    groups      <- l$groups
+    l                      <- findExpts( args, files, groups)
+    files                  <- l$files
+    groups                 <- l$groups
+    args$baits[[l$expt]]   <- args$bait
+    args$offsets[[l$expt]] <- args$offset
     makeSummary3( groups, outdir, args )
 }
 #collectAllMods( files )

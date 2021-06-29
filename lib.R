@@ -1,6 +1,6 @@
 options(java.parameters = "-Xmx8182m")
 options( warn = -1)
-suppressPackageStartupMessages( library('XLConnect' ))
+# suppressPackageStartupMessages( library('XLConnect' ))
 suppressPackageStartupMessages( library('data.table'))
 suppressPackageStartupMessages( library('sqldf'))
 suppressPackageStartupMessages( library('argparse'))
@@ -8,10 +8,13 @@ suppressPackageStartupMessages( library( "hash" ))
 suppressPackageStartupMessages( library( "R.utils" ))
 suppressPackageStartupMessages( library(dplyr))
 suppressPackageStartupMessages( library(DBI))
-library('parallel')
-library('doParallel')
-library('stringr')
-require(readxl)
+suppressPackageStartupMessages( library('parallel'))
+suppressPackageStartupMessages( library('foreach'))
+suppressPackageStartupMessages( library('doParallel'))
+suppressPackageStartupMessages( library('stringr'))
+suppressPackageStartupMessages( require(readxl))
+suppressPackageStartupMessages( require(rio))
+suppressPackageStartupMessages( library(tidyr))
 
 pogodir       <- '/usr/local/share/bin/'
 sheetToRead   <- 'Spectra'
@@ -30,6 +33,7 @@ modifications <- hash('+71.037'  = 'Propionamide',
                       '+43.006'  = 'Carbamoylation',
                       '+14.016'  = 'Methyl',
                       '+28.032'  = 'Dimethyl',
+                      '+28.031'  = 'Dimethyl',
                       '+42.011'  = 'Acetyl',
                       '+79.966'  = 'Phosphorylation',
                       '+226.078' = 'Biotinylation',
@@ -64,22 +68,41 @@ gnre      <- '^.+GN=([^ ]+) ?.*$'
 
 ref_files  <- data.table( taxid = c(9606, 10090, 9606, 10090),
                           ref = c('fasta', 'fasta', 'gtf', 'gtf'),
-                          path = c('input/gencode.v26.pc_translations.fa',
-                                   'input/gencode.vM14.pc_translations.fa',
-                                   'input/gencode.v26.annotation.gtf',
-                                   'input/gencode.vM14.annotation.gtf' ))
+                          path = c('input/gencode.v30.pc_translations.fa',
+                                   'input/gencode.vM21.pc_translations.fa',
+                                   'input/gencode.v30.annotation.gtf',
+                                   'input/gencode.vM21.annotation.gtf' ))
 pogo       <- data.table( taxid = c(10090, 9606), cmd = c('./PoGo_mm', './PoGo'))
 
+dupFile  <- ifelse(Sys.info()['sysname'] == 'Windows',
+                   'Z:/djscripts/data/pickles/dup_latest.txt',
+                   ifelse(Sys.info()['sysname'] == 'Darwin', '
+                          ~/mnt/driveB/jdemeter/djscripts/data/pickles/dup_latest.txt',
+                          '/usr/local/share/py/djscripts/data/pickles/dup_latest.txt' ))
+
+getDBcon <- function(){
+    if(Sys.info()['sysname'] == 'Windows'){
+        x <- suppressWarnings(fread('D:/jdemeter/my.cnf', sep = '=', skip = 1, header = F))
+        y <- x$V2
+        names(y) <- x$V1
+        con_sql  <- dbConnect( RMySQL::MySQL(), user = y[['user']], password = y[['password']],
+                               dbname = y[['database']], host = y[['host']] )
+    } else {
+        con_sql  <- dbConnect( RMySQL::MySQL(), group = "tcga" )
+    }
+}
+
 retrieveArgs <- function( args ){
-    con_sql  <- dbConnect( RMySQL::MySQL(), group = "tcga" )
+
+    con_sql  <- getDBcon()
     sql      <- paste0("select bait_symbol, tag_length, ff_folder, taxid
                        from network_dproc p, network_psample s
                        where p.expid_id = s.expid_id
                        and p.id = ", trim(args$uid) )
-    print(paste('sql=', sql))
+    #print(paste('sql=', sql))
     query    <- dbSendQuery( con_sql, sql )
     rs       <- as.data.table(fetch( query, n = -1 ))
-    print(str(rs))
+    print(rs)
     dbClearResult( query )
     dbDisconnect(con_sql)
     if( nrow(rs) > 1){
@@ -242,7 +265,8 @@ collectAllMods <- function( fs ){
     modifs <- character()
     fh <- file( "log.txt", 'wt' )
     for( f in fs ){
-        cont <- readWorksheetFromFile( f, sheetName = sheetToRead )
+        #cont <- readWorksheetFromFile( f, sheetName = sheetToRead )
+        cont <- read_excel(f, sheet = sheetToRead) %>% as.data.table
         mods <- as.character(levels(cont[,5]))
         for( m in mods ){
             if( grepl( '\\[', m, perl=TRUE )){
@@ -299,243 +323,124 @@ compare_datasets <- function( filea, fileb, namea, nameb, outfile ){
                 quote = FALSE, row.names = FALSE)
 }
 
+currversion <- function(table = 'entrez'){
+    con_sql <- getDBcon()
+    q <- dbSendQuery( con_sql,
+                      paste0('select id from network_version ',
+                             "where tablename = '",
+                             table, "' and inuse = 1"))
+    vid <- as.integer(fetch(q, n = -1))
+    dbClearResult( q )
+    dbDisconnect( con_sql )
+    return(vid)
+}
+
 dbAnnots <- function( ){
-    con_sql <- dbConnect( RMySQL::MySQL(), group = "tcga" )
-    query   <- dbSendQuery( con_sql, "select name ref, symbol_ref from (
+
+    evid    <- currversion()
+    con_sql <- getDBcon()
+    query   <- dbSendQuery( con_sql,
+                            paste("select name ref, symbol_ref from (
                             select SUBSTRING_INDEX(SUBSTRING_INDEX(entrez.peptide, ';', numbers.n), ';', -1) name,
-                            entrez.symbol symbol_ref, entrez.taxid
+                            entrez.symbol symbol_ref, entrez.taxid, entrez.vid
                             from
                             numbers inner join entrez
                             on CHAR_LENGTH(entrez.peptide)
                             -CHAR_LENGTH(REPLACE(entrez.peptide, ';', ''))>=numbers.n-1
                             order by symbol
-    ) x
-                            where name <> ''" )
+                            ) x
+                            where name <> ''
+                            and vid =", evid ))
     rs    <- as.data.table(fetch( query, n = -1 ))
     dbClearResult( query )
-    query <- dbSendQuery( con_sql, "select swissprot sp, symbol symbol_sp from entrez where swissprot <> ''
-                          union
-                          select trembl, symbol from entrez where trembl <> ''" )
+    query <- dbSendQuery( con_sql,
+                          paste("select swissprot sp, symbol symbol_sp",
+                                "from entrez where swissprot <> ''",
+                                'and vid =', evid,
+                                'union',
+                                "select trembl, symbol from entrez",
+                                "where trembl <> ''",
+                                'and vid =', evid))
     sp    <- as.data.table(fetch( query, n = -1 ))
     dbClearResult( query )
     dbDisconnect(con_sql)
     return(list(sp=sp, rs=rs))
 }
 
-findExpts <- function( args, files, groups) {
+detCoverage1 <- function( outfile, sumfile ){
+    print( 'Calculating coverage...' )
+    pept <- fread( sumfile ) %>%
+        .[!symbol %in% c('CONTAM'),
+          acc := gsub('^>(.P_\\d+)(\\.\\d)? .*', '\\1', descr)] %>%
+        .[!is.na(acc) & start != '' & end != '']
+    pepuniq <- pept[, .(acc, symbol, start, end)] %>% unique %>%
+        .[order(acc, symbol, start, end)]
 
-    if( length( args$path ) > 0 ){
-        if( args$path %in% c( 'all', 'new' ) ){
-            dirs    <- list.dirs( recursive = FALSE )
-            newOnly <<- ifelse( args$path == 'new', TRUE, FALSE )
-        } else {
-            dirs    <- strsplit(args$path, ',')[[1]]
-        }
-    } else{
-        stop( '\n    Please, provide a dataset/all to process!', call. = F )
-    }
-    for (d in dirs) {
-        if( dir.exists( d ) && d != '.'){
-            if ( grepl('^\\./', d, perl = TRUE) ) {
-                expt <- sub( './', '', d )
-            } else {
-                expt <- d
-            }
-            groups[ expt ] <- character()
-            df <- list.files( d )
-            for (f in df) {
-                if (grepl('^[0-9a-zA-Z].*.xlsx$', f)) {
-                    if( grepl( 'HeatMap', f )){
-                        next()
-                    } else if( grepl('.*Blank.*', f)){
-                        next()
-                    }
-                    f <- paste0(d, '/', f)
-                    files <- c(files, f)
-                    groups[expt] <- c(groups[[expt]], f)
-                }
-            }
-        }
-    }
-
-    return( list( "groups" = groups, "files" = files ))
-}
-
-findPosition <- function( seqn, strt, str = 'hash', nseq = FALSE, dtype = 'sums_byonic' ){
-    # this function determines about the modification its:
-    #    residue (what amino acid)
-    #    position ( where in the protein sequence)
-    #    modification type (acetylation, ...)
-
-    # it returns a hash, with the key(s) position
-    # and values a vector containing residue and mtype
-    #print(paste(seqn, strt, str, dtype))
-    if( str == 'hash' ){
-        h        <- hash()
+    # get max isoform length for each protein accession
+    if(sum(grepl('\\|', unique(pept$descr))) < length(unique(pept$descr))*0.9){
+        # most likely an older annotation, sep = ' '
+        # protein length is in ind = -3
+        pept[, len := as.integer(gsub('^.* (\\d+) [^ ]+ [^ ]+$', '\\1', descr))]
     } else {
-        h        <- data.table(residue = character(), pos = numeric(), modif = character() )
-    }
-    fragment     <- seqn
-    #print( paste('fr=', fragment, 'strt=', strt))
-
-    search_str   <- '\\[[^a-zA-Z]+\\]'
-    if( dtype == 'gygi' ){
-        search_str <- '[^a-zA-Z]'
+        # standard, sep = ' | '
+        pept[, len := as.integer(gsub('^.* \\| (\\d+) \\| [^ ]+ \\| [^ ]+$', '\\1', descr))]
     }
 
-    while( grepl(search_str, fragment) ){
-        #print(fragment)
-        # index of the first '[' -
-        ind      <- str_locate( fragment, search_str )[1]
-        if( ind == 1 ){
-            residue  <- 'N-term'
-            pos      <- as.character(as.integer( strt ))
-        } else {
-            residue  <- substr(fragment, ind-1, ind-1 )
-            # the position of the modified residue in the protein
-            pos      <- as.character(as.integer( strt ) + ind - 2 )
-        }
-        # this is the matched modificaton (e.g.: +42.011)
-        modif    <- gsub( '[\\[\\]]', '', str_extract(fragment, search_str), perl = T)
+    # this is a matrix to keep track of covered positions
+    covm <- matrix(0,
+                   nrow = length(unique(pept$acc)),
+                   ncol = max(pept$len, na.rm = T))
+    rownames(covm) <- pepuniq$acc %>% unique()
 
-        if( dtype == 'gygi' ){
-            modif <- gygi_mods[[modif]]
-        }
-        # remove the modification (e.g.: [+42.011])
-        fragment <- sub( search_str, '', fragment )
+    sapply(unique(pepuniq$acc), function(xacc){
+        # print(xacc)
+        d <- pepuniq[acc == xacc, .(start = min(start)), end] %>%
+            .[, .(end = max(end)), start] %>%
+            .[order(start)]
+        pos <- d[, apply(.SD, 1, function(x){
+            seq(x[1], x[2])
+        })] %>% unlist %>% as.integer %>% sort %>% unique %>%
+            .[.>0] # when dealing with the bait, we could get negative indeces
+        covm[xacc, pos] <<- 1
+    })
 
-        if( str == 'hash' ){
-            # save the values into a hash
-            h[ pos ] <- c( residue, pos, modifications[[modif]] )
-        } else {
-            # print( seqn )
-            if(! modif %in% keys(modifications)){
-                modifications[modif] <<- paste0('unknown: ', modif)
-            }
-            h    <- rbindlist( list(h, data.table(residue = as.character(residue),
-                                                  pos = as.numeric(pos),
-                                                  modif = as.character(modifications[[modif]]))))
-        }
-    }
-    if( str != 'hash' ){
-        if( nrow(h) ==  0 ){
-            h <- data.table( residue = as.character(NA), pos = as.numeric(NaN), modif = 'unmodified' )
-        }
-    }
-    if( nseq == TRUE ){
-        h[, nseq := rep(fragment, nrow(h)) ]
-    }
-    # HO-proline and HO-Asn have the same diff as oxidation - they have to be fixed
-    # as special case
-    for( k in keys(spec_mods)){
-        h[ residue == spec_mods[[k]][2] & modif == spec_mods[[k]][1], modif := k ]
-    }
-    return( h )
+    # count covered aas
+    covm <- covm %>%
+        as.data.table(keep.rownames = 'acc') %>%
+        .[, cov := rowSums(.SD[, -c('acc')], na.rm = T)] %>%
+        .[, .(acc, cov)]
+
+    # coverage per gene symbol
+    cov <- pept %>%
+        left_join(covm, by = 'acc') %>%
+        as.data.table %>%
+        .[, cov_per := round(100*cov/len, 2)] %>%
+        .[,
+          .(uniq_pept = uniqueN(nseq), len = max(cov),
+            len.full = mean(unique(len)), cov = max(cov_per)),
+          .(symbol)] %>%
+        .[, .(symbol, len, len.full, cov, uniq_pept)]
+
+    fwrite(cov, outfile, sep = '\t')
 }
-
-findSymbol <- function( desc ){
-    # the symbol can be got from rbase structure 'dup'
-    # truncate desc to 'matchLength'
-    d <- substr( desc, 1, matchLength )
-    if( nrow(dup[desc == d])>0 ){
-        symbol <- dup[ desc == d, symbol ][1]
-    } else if( grepl( '.*contam.*', desc, ignore.case=TRUE, perl=TRUE ) ){
-        symbol <- 'CONTAM'
-    } else {
-        symbol <- 'UNKNOWN'
-        # make a last effort to find the correct symbol
-        r   <- gsub(refseqre, '\\1', d)
-        uni <- gsub(uniprotre, '\\2', d)
-
-        # some of the uniprot accession have a -n extension
-        uni <- gsub('-\\d+$', '', uni)
-
-        if( nrow(dup[ ref == r,])>0 ){
-            symbol <- dup[ ref == r, symbol ][1]
-        } else if( nrow(dup[ sp == uni,])>0){
-            symbol <- dup[ tolower(sp) == tolower(uni), symbol ][1]
-        }
-    }
-    #    print( paste(d, symbol) )
-    return( symbol )
-}
-
-fixAnnots <- function( d ){
-    # get current symbols
-    db <- dbAnnots()
-
-    # prase out refseq and swissprot ids
-    d[symbol == 'UNKNOWN' & grepl(uniprotre, descr), sp := gsub('-\\d+$', '', gsub(uniprotre, '\\2', descr))]
-    d[symbol == 'UNKNOWN' & grepl(refseqre, descr), ref := gsub(refseqre, '\\1', descr)]
-
-    # find the corresponding symbols
-    d <- as.data.table( left_join( d, db$rs, by = 'ref'))
-    d <- as.data.table( left_join( d, db$sp, by = 'sp'))
-
-    # update to current symbols
-    d[ symbol == 'UNKNOWN' & !is.na(symbol_ref), symbol := symbol_ref]
-    d[ symbol == 'UNKNOWN' & !is.na(symbol_sp), symbol := symbol_sp]
-
-    # if there are still UNKNOWNs and they have GN
-    d[ symbol == 'UNKNOWN' & grep('GN=', descr), symbol := gsub(gnre, '\\1', descr)]
-
-    # drop unneeded columns
-    d[, c('ref', 'sp', 'symbol_ref', 'symbol_sp') := NULL]
-    return( d )
-}
-
-fixSeq <- function( x ){
-    # remove 'context' residues at the
-    # begining and end of detected peptide
-    x <- sub( '^[A-Z-]\\.', '', x, perl=TRUE )
-    x <- sub( '\\.[A-Z-]$', '',  x, perl=TRUE )
-    return( x )
-}
-
-increaseTotals <- function( symbol, seqn, strt, sumData ){
-    # increase total counts for positions with
-    # modified residues
-    fragment <- seqn
-    end      <- as.integer( strt ) + nchar( fragment ) - 1
-
-    for( i in seq( as.integer( strt ), end )){
-        key <- makeKey( as.character( i ), symbol )
-        if( has.key( key, sumData )){
-            sumData[[ key ]][ 5 ] <- as.integer(sumData[[ key ]][ 5 ]) + 1
-        }
-    }
-}
-
-makeDupMap  <- function(){
-
-    # the dup.txt file contains the symbols
-    # it has to be updated before looking
-    # at modifications in a new dataset
-    #cwd         <- getwd()
-    #setwd( '/usr/local/share/py/' )
-    #    setwd( '/mnt/driveB/jdemeter/usr/py/' )
-
-    # run 'convertDup.py' to update 'dup.txt'
-    #system( 'pwd' )
-    #print( 'updating dup.txt file' )
-    #system( 'python3 convertDup.py' )
-    #setwd( cwd )
-
-    # a text file is writen when dup is updated,
-    # so the file needs to be loaded only
-    readDupMap( )
-}
-
-makeKey <- function( pos, symbol ){
-    # create a key from symbol and position
-    return( paste( symbol, pos, sep=':' ))
-}
-
 detCoverage <- function( outfile, sumfile ){
     print( 'Calculating coverage...' )
     pept <- fread( sumfile )
     pept_uniq <- unique(pept[!is.na(pept), c(3,5:7), with=FALSE])
     pept_uniq <- pept_uniq[order(symbol, start, end)]
+
+    # get max isoform length for each gene symbol
+    con_sql  <- getDBcon()
+    sql      <- paste("select e.symbol, max(len) len",
+                      'from ncbiprots n, entrez e',
+                      'where n.eid = e.eid',
+                      'and e.vid =', currversion('entrez'),
+                      'and n.vid =', currversion('ncbiprot'),
+                      "group by e.eid")
+    query    <- dbSendQuery( con_sql, sql )
+    entr_len <- as.data.table(fetch( query, n = -1 ))
+    dbClearResult( query )
+    dbDisconnect(con_sql)
 
     # an attempt to deal with overlapping peptides
     uniq_pepts   <- data.table()
@@ -582,14 +487,6 @@ detCoverage <- function( outfile, sumfile ){
 
     coverage <- uniq_pepts[, .(len = sum(end-start+1)), symbol]
 
-    # get max isoform length for each gene symbol
-    con_sql  <- dbConnect( RMySQL::MySQL(), group = "tcga" )
-    sql      <- "select e.symbol, max(len) len from ncbiprots n, entrez e where n.eid = e.eid group by e.eid"
-    query    <- dbSendQuery( con_sql, sql )
-    entr_len <- as.data.table(fetch( query, n = -1 ))
-    dbClearResult( query )
-    dbDisconnect(con_sql)
-
     coverage <- as.data.table(left_join(coverage, entr_len, by = 'symbol', suffix = c('', '.full')))
 
     # calculate coverage
@@ -599,6 +496,306 @@ detCoverage <- function( outfile, sumfile ){
     coverage <- as.data.table(left_join(coverage, pept_uniq[, .(uniq_pept = .N), symbol][order(uniq_pept)],
                                         by = 'symbol', suffix = c('', '.')))
     fwrite(coverage, outfile, sep = '\t')
+}
+
+findExpts <- function( args, files, groups) {
+
+    if( length( args$path ) > 0 ){
+        if( args$path %in% c( 'all', 'new' ) ){
+            dirs    <- list.dirs( recursive = FALSE )
+            newOnly <<- ifelse( args$path == 'new', TRUE, FALSE )
+        } else {
+            dirs    <- strsplit(args$path, ',')[[1]]
+        }
+    } else{
+        stop( '\n    Please, provide a dataset/all to process!', call. = F )
+    }
+    for (d in dirs) {
+        if( dir.exists( d ) && d != '.'){
+            if ( grepl('^\\./', d, perl = TRUE) ) {
+                expt <- sub( './', '', d )
+            } else {
+                expt <- d
+            }
+            groups[ expt ] <- character()
+            df <- list.files( d )
+            for (f in df) {
+                if (grepl('^[0-9a-zA-Z].*.xlsx$', f)) {
+                    if( grepl( 'HeatMap', f )){
+                        next()
+                    } else if( grepl('.*Blank.*', f)){
+                        next()
+                    }
+                    f <- paste0(d, '/', f)
+                    files <- c(files, f)
+                    groups[expt] <- c(groups[[expt]], f)
+                }
+            }
+        }
+    }
+
+    return( list( "groups" = groups, "files" = files, 'expt' = expt ))
+}
+
+findPos <- function(gd, dtype = 'sums_byonic'){
+    print( 'collect modifications...' )
+    if(dtype != 'sums_byonic'){
+        print(system.time(
+            gdata <- gd %>% left_join(
+                bind_rows( apply(gd, 1, function(x){
+                    # get the seqn without the modifications
+                    findPosition( as.character(x['seqn_f']), as.character(x['start']),
+                                  as.integer(x['pept']), 'data.table', TRUE, datatype )
+                })), by = 'pept'
+            ) %>% as.data.table))
+    } else {
+        gdata <- findPosition2(gd)
+    }
+
+    return(gdata)
+}
+
+findPosition2 <- function( dtab ){
+
+    print('findPosition2 ...')
+    #getmod <- function()
+    search_str <- '\\[[^a-zA-Z]+\\]'
+    dt <- data.table::copy(dtab)
+
+    # sometimes there are modifications that are actually not there, e.g.:
+    #     HIIVAC[+71.037][-71.037]EGNPYVPVHFDASV
+    # remove these
+    dt[grepl('\\[(\\+|\\-)([^a-zA-Z]+)\\]\\[(\\+|\\-)\\2\\]', seqn_f),
+       gsub('\\[(\\+|\\-)([^a-zA-Z]+)\\]\\[(\\+|\\-)\\2\\]', '', seqn_f)]
+
+    dt[, nseq := seqn_f]
+
+    # starting aa is modified
+    dt[grepl('^\\[', seqn_f),
+       `:=`(residue = 'N-term',
+            pos     = as.character(start),
+            modif   = sapply(seqn_f,
+                             function(x){
+                                 x <- gsub( '[\\[\\]]',
+                                            '',
+                                            str_extract(x, search_str),
+                                            perl = T)
+                                 ifelse(x %in% keys(modifications),
+                                        modifications[[x]],
+                                        paste('unknown:', x))}),
+            nseq    = str_replace(seqn_f, search_str, ''))]
+
+    # capture all the others
+    while(nrow(dt[grepl(search_str, nseq)]) > 0){
+        dt[grepl('\\[', nseq),
+           `:=`(residue = paste(residue,
+                                str_replace(nseq, '^[^\\[]*(.)\\[.*$', '\\1'),
+                                sep = ';'),
+                modif   = paste(modif,
+                                sapply(gsub( '[\\[\\]]',
+                                             '',
+                                             str_extract(nseq, search_str),
+                                             perl = T),
+                                       function(x){
+                                           ifelse( x %in% keys(modifications),
+                                                   modifications[[x]],
+                                                   paste('unknown:', x))
+                                       }),
+                                sep = ';'),
+                pos     = paste(pos,
+                                as.character(
+                                    nchar(str_replace(nseq,
+                                                      '^([^\\[]+)\\[.*$',
+                                                      '\\1')) - 1 + start),
+                                sep = ';'),
+                # update this column with the modification removed
+                nseq    = str_replace(nseq, search_str, ''))]
+    }
+
+    dt <- dt %>%
+        separate_rows(residue, pos, modif, sep = ';') %>%
+        as.data.table %>%
+        .[!(residue == 'NA' & grepl('\\[', seqn_f))] %>%
+        .[, pos := as.integer(pos)]
+
+    # update certain modifications:
+    for( k in keys(spec_mods)){
+        dt[residue == spec_mods[[k]][2] & modif == spec_mods[[k]][1],
+           modif := k ]
+    }
+    print('back from findPosition2')
+    return(dt)
+}
+
+findPosition <- function( seqn, strt, index, str = 'hash',
+                          nseq = FALSE, dtype = 'sums_byonic' ){
+    # this function determines about the modification its:
+    #    residue (what amino acid)
+    #    position ( where in the protein sequence)
+    #    modification type (acetylation, ...)
+
+    # it returns a hash, with the key(s) position
+    # and values a vector containing residue and mtype
+    #print(paste(seqn, strt, str, dtype))
+    h <- list(a = hash(),
+              b = data.table(residue = character(), pos = numeric(),
+                             modif = character(), pept = integer() ))
+    names(h) <- c('hash', str)
+
+    search_str   <- '\\[[^a-zA-Z]+\\]'
+    if( dtype == 'gygi' ){
+        search_str <- '[^a-zA-Z]'
+    }
+
+    fragment     <- seqn
+    #print(paste('ind=',index))
+    while( any(grepl(search_str, fragment)) ){
+        #print(fragment)
+        # index of the first '[' -
+        ind      <- str_locate( fragment, search_str )[1]
+        if( ind == 1 ){
+            residue  <- 'N-term'
+            pos      <- as.character(as.integer( strt ))
+        } else {
+            residue  <- substr(fragment, ind-1, ind-1 )
+            # the position of the modified residue in the protein
+            pos      <- as.character(as.integer( strt ) + ind - 2 )
+        }
+        # this is the matched modificaton (e.g.: +42.011)
+        modif    <- gsub( '[\\[\\]]', '', str_extract(fragment, search_str), perl = T)
+        if( dtype == 'gygi' ){
+            modif <- gygi_mods[[modif]]
+        }
+        if(! modif %in% keys(modifications)){
+            modifications[modif] <<- paste0('unknown: ', modif)
+        }
+
+        # remove the modification (e.g.: [+42.011])
+        fragment <- sub( search_str, '', fragment )
+
+        # save the values
+        h[['hash']][ pos ] <- c( residue, pos, modifications[[modif]] )
+        h[[ str ]]         <- bind_rows(h[[str]],
+                                        data.table(residue = as.character(residue),
+                                                   pos = as.numeric(pos),
+                                                   modif = as.character(modifications[[modif]]),
+                                                   pept = index))
+    }
+
+    if( str != 'hash' && nrow(h[[str]]) == 0 ){
+        h[[str]] <- data.table(residue = as.character(NA), pos = as.numeric(NaN),
+                               modif = 'unmodified', pept = index)
+    }
+
+    if( nseq == TRUE ){
+        h[[str]][, nseq := rep(fragment, nrow(h[[str]])) ]
+    }
+
+    # HO-proline and HO-Asn have the same diff as oxidation - they have to be fixed
+    # as special case
+    for( k in keys(spec_mods)){
+        h[[str]][ residue == spec_mods[[k]][2] & modif == spec_mods[[k]][1], modif := k ]
+    }
+
+    return( h[[str]] )
+}
+
+findSymbol <- function( desc ){
+    # the symbol can be got from rbase structure 'dup'
+    # truncate desc to 'matchLength'
+    d <- substr( desc, 1, matchLength )
+    if( nrow(dup[desc == d])>0 ){
+        symbol <- dup[ desc == d, symbol ][1]
+    } else if( grepl( '.*contam.*', desc, ignore.case=TRUE, perl=TRUE ) ){
+        symbol <- 'CONTAM'
+    } else {
+        symbol <- 'UNKNOWN'
+        # make a last effort to find the correct symbol
+        r   <- gsub(refseqre, '\\1', d)
+        uni <- gsub(uniprotre, '\\2', d)
+
+        # some of the uniprot accession have a -n extension
+        uni <- gsub('-\\d+$', '', uni)
+
+        if( nrow(dup[ ref == r,])>0 ){
+            symbol <- dup[ ref == r, symbol ][1]
+        } else if( nrow(dup[ sp == uni,])>0){
+            symbol <- dup[ tolower(sp) == tolower(uni), symbol ][1]
+        }
+    }
+    #    print( paste(d, symbol) )
+    return( symbol )
+}
+
+fixAnnots <- function( d ){
+    # get current symbols
+    db <- dbAnnots()
+
+    # parse out refseq and swissprot ids
+    d[symbol == 'UNKNOWN' & grepl(uniprotre, descr), sp := gsub('-\\d+$', '', gsub(uniprotre, '\\2', descr))]
+    d[symbol == 'UNKNOWN' & grepl(refseqre, descr), ref := gsub(refseqre, '\\1', descr)]
+
+    # find the corresponding symbols
+    d <- as.data.table( left_join( d, db$rs, by = 'ref'))
+    d <- as.data.table( left_join( d, db$sp, by = 'sp'))
+
+    # update to current symbols
+    d[ symbol == 'UNKNOWN' & !is.na(symbol_ref), symbol := symbol_ref]
+    d[ symbol == 'UNKNOWN' & !is.na(symbol_sp), symbol := symbol_sp]
+
+    # if there are still UNKNOWNs and they have GN
+    d[ symbol == 'UNKNOWN' & grep('GN=', descr), symbol := gsub(gnre, '\\1', descr)]
+
+    # drop unneeded columns
+    d[, c('ref', 'sp', 'symbol_ref', 'symbol_sp') := NULL]
+    return( d )
+}
+
+fixSeq <- function( x ){
+    # remove 'context' residues at the
+    # begining and end of detected peptides
+    x <- sub( '^[A-Z-]\\.', '', x, perl=TRUE )
+    x <- sub( '\\.[A-Z-]$', '',  x, perl=TRUE )
+    return( x )
+}
+
+increaseTotals <- function( symbol, seqn, strt, sumData ){
+    # increase total counts for positions with
+    # modified residues
+    fragment <- seqn
+    end      <- as.integer( strt ) + nchar( fragment ) - 1
+
+    for( i in seq( as.integer( strt ), end )){
+        key <- makeKey( as.character( i ), symbol )
+        if( has.key( key, sumData )){
+            sumData[[ key ]][ 5 ] <- as.integer(sumData[[ key ]][ 5 ]) + 1
+        }
+    }
+}
+
+makeDupMap  <- function(){
+
+    # the dup.txt file contains the symbols
+    # it has to be updated before looking
+    # at modifications in a new dataset
+    #cwd         <- getwd()
+    #setwd( '/usr/local/share/py/' )
+    #    setwd( '/mnt/driveB/jdemeter/usr/py/' )
+
+    # run 'convertDup.py' to update 'dup.txt'
+    #system( 'pwd' )
+    #print( 'updating dup.txt file' )
+    #system( 'python3 convertDup.py' )
+    #setwd( cwd )
+
+    # a text file is writen when dup is updated,
+    # so the file needs to be loaded only
+    readDupMap( )
+}
+
+makeKey <- function( pos, symbol ){
+    # create a key from symbol and position
+    return( paste( symbol, pos, sep=':' ))
 }
 
 makeMatrixFile <- function( gs ){
@@ -625,9 +822,10 @@ makeMatrixFile <- function( gs ){
         for( f in fs ){
             print( f )
 
-            #system( paste( python, pyParser, paste0( '"', f, '"' ), ftsv, sheet ))
-            #fraction <- fread( ftsv, skip = 1 )
-            fraction <- data.table( readWorksheetFromFile( f, sheet = sheet ))
+            # system( paste( python, pyParser, paste0( '"', f, '"' ), ftsv, sheet ))
+            # fraction <- fread( ftsv, skip = 1 )
+            # fraction <- data.table( readWorksheetFromFile( f, sheet = sheet ))
+            fraction <- data.table( read_excel( f, sheet = sheet ))
             fraction <- fraction[, c(2,7), with = FALSE ]
             if( length(fraction) > 0 ){
                 fraction           <- cbind( g, fraction )
@@ -697,7 +895,8 @@ makeSummary <- function( gs ){ # input is a hash of arrays
                     #    fraction       <- as.data.frame(fread( ftsv ))
                     #}
 
-                    fraction           <- readWorksheetFromFile( f, sheet = sheetToRead )
+                    # fraction           <- readWorksheetFromFile( f, sheet = sheetToRead )
+                    fraction           <- read_excel( f, sheet = sheetToRead ) %>% as.data.frame
                     # we only need columns # 3, 5, 12, 19
                     fraction           <- fraction[, c(3,5,12,19)]
                     colnames(fraction) <- c('seqn', 'mods', 'start', 'descr')
@@ -754,7 +953,8 @@ makeSummary2 <- function( gs, keep_unmodified_peptides = TRUE ){ # input is a ha
                     for( f in fs ){
                         print( f )
 
-                        fraction           <- readWorksheetFromFile( f, sheet = sheetToRead )
+                        # fraction           <- readWorksheetFromFile( f, sheet = sheetToRead )
+                        fraction           <- read_excel( f, sheet = sheetToRead ) %>% as.data.frame
                         # we only need columns # 3, 5, 12, 19
                         fraction           <- fraction[, c(3,5,12,19)]
                         colnames(fraction) <- c('seqn', 'mods', 'start', 'descr')
@@ -882,7 +1082,7 @@ makeSummary3 <- function( gs, outdir, args ){ # input is a hash of arrays
                     for( f in fs ){
                         print( f )
                         fraction           <- as.data.table(
-                            readWorksheetFromFile( f, sheet = sheetToRead ))
+                            read_excel( f, sheet = sheetToRead ))
                         #print(paste('colnames: ', colnames(fraction)))
                         if('Trimmed.Peptide' %in% colnames(fraction)){
                             # the data are from the Gygi lab
@@ -918,6 +1118,8 @@ makeSummary3 <- function( gs, outdir, args ){ # input is a hash of arrays
                     # remove reverse hits
                     gData                 <- gData[ !grepl( '.*Reverse.*', descr),
                                                     .(fraction, seqn, mods, start, score, missed, descr )]
+                    # remove contaminants
+                    gData                 <- gData[ !grepl('contaminant', descr)]
 
                     # change descr if we have a need for that
                     if( 'map_descr' %in% names(args) ){
@@ -929,31 +1131,28 @@ makeSummary3 <- function( gs, outdir, args ){ # input is a hash of arrays
                     }
 
                     print( 'lookup symbols...' )
+                    print('findSymbol ...')
                     gData[, symbol        := sapply(descr, findSymbol)]
+                    print('fixAnnots...')
                     gData                 <- fixAnnots( gData )
+                    print('numModSites...')
                     gData[, numModSites   := sapply(seqn, numModSites, dtype = datatype)]
+                    print('fixSeq...')
                     gData[, seqn_f        := sapply(seqn, fixSeq)]
                     gData[, pept          := .I]
                     print( 'write table with all data...' )
                     fwrite( gData, all_data_file, sep = '\t' )
-                    outputForPogo( gData, g,  pogo_file )
-                    print( 'run pogo...')
-                    runPogo( pogo_file, args$taxid )
+                    if( 'usepogo' %in% names(args) & args$usepogo == TRUE ){
+                        outputForPogo( gData, g,  pogo_file )
+                        print( 'run pogo...')
+                        runPogo( pogo_file, args$taxid )
+                    }
                 } else {
                     gData                 <- fread( all_data_file )
                 }
 
                 gData[, fraction := NULL ]
-                print( 'collect modifications...' )
-                gdata                <- bind_rows( apply(gData, 1, function(x){
-                    # get the seqn without the modifications
-                    y  <- findPosition( as.character(x['seqn_f']), as.character(x['start']), 'data.table', TRUE, datatype )
-                    x  <- data.table(matrix(x, nrow = 1, dimnames = list(1, names(x))))
-                    while( nrow(y) > nrow(x)){
-                        x <- bind_rows( x, x[1])
-                    }
-                    y  <- bind_cols(as.data.table(x), as.data.table(y))
-                }))
+                gdata <- findPos( gData )
 
                 print( 'do counts and save...' )
 
@@ -966,30 +1165,35 @@ makeSummary3 <- function( gs, outdir, args ){ # input is a hash of arrays
                              by = .(symbol, descr, modif, pos, residue)]
                 # count the number of unique peptides that cover each modification position
                 res[, all_count := apply(res, 1, function(x){
-                    #x <- as.character(x)
-                    y <- gdata[as.integer(x['pos']) >= as.integer(start) &
-                                   as.integer(x['pos']) <= as.integer(end) &
-                                   x['descr'] == descr,
-                               uniqueN(pept)]
-                    return(y)
+                    gdata[as.integer(x['pos']) >= as.integer(start) &
+                              as.integer(x['pos']) <= as.integer(end) &
+                              x['descr'] == descr,
+                          uniqueN(pept)]
                 })]
 
                 # mean 'missed' for unmodified peptides
                 res[, unmod_missed := apply(res, 1, function(x){
-                    y <- gdata[modif == 'unmodified' & as.integer(x['pos']) >= as.integer(start) &
-                                   as.integer(x['pos']) <= as.integer(end) &
-                                   x['descr'] == descr,
-                               mean(as.integer(missed))]
-                    return(y)
+                    gdata[modif == 'unmodified' & as.integer(x['pos']) >= as.integer(start) &
+                              as.integer(x['pos']) <= as.integer(end) &
+                              x['descr'] == descr,
+                          mean(as.integer(missed))]
                 })]
 
-                res <- bind_rows(gdata[, uniqueN(pept), by = .(pept, symbol, descr, start, end, nseq)][,-'V1'], res)
+                res <- bind_rows(gdata[, uniqueN(pept),
+                                       .(pept, symbol, descr, start, end, nseq)][,-'V1'],
+                                 res)
 
                 # correct coordinates of the baits for the N-terminal fragment of the tag
-                if( nrow(res[ symbol == args$bait]) > 0 & args$offset > 0 ){
-                    res[ symbol == args$bait & grepl('Puro_', descr), start := as.integer(start) - args$offset ]
-                    res[ symbol == args$bait & grepl('Puro_', descr), end := as.integer(end) - args$offset ]
-                    res[ symbol == args$bait & grepl('Puro_', descr), pos := as.integer(pos) - as.integer(args$offset) ]
+                # the endogeneous proteins might be expressed, or there might be
+                # contamination from N/C-term tagged version run just before ...
+                sym  <- args$baits[[g]]
+                oset <- as.integer(args$offsets[[g]])
+                desc <- res[grepl(sym, descr) & !grepl('^>.P_', descr), # assume refseq library
+                            .N, descr][order(-N)][1, descr] # the desc field for the actual bait
+                if( args$offsets[[g]] > 0 ){
+                    res[ descr == desc, start := as.integer(start) - oset ]
+                    res[ descr == desc, end := as.integer(end) - oset ]
+                    res[ descr == desc, pos := as.integer(pos) - oset ]
                     res <- res[ pos > -1 | is.na(pos), ]
                 }
                 # add dset name as the first column
@@ -1002,7 +1206,9 @@ makeSummary3 <- function( gs, outdir, args ){ # input is a hash of arrays
             }
         }
         if( (!file.exists( cov_file) || args$overwrite )){
-            detCoverage( cov_file, summaryFile )
+            print(system.time(
+            detCoverage1( cov_file, summaryFile )
+            ))
         }
     }
 }
@@ -1062,8 +1268,7 @@ printResult <- function( expt, summaryFile, sumData, totalModSites, totalPeptCou
 }
 
 readDupMap  <- function(){
-    #dup      <<- fread( '/usr/local/share/py/djscripts/data/pickles/dup_latest.txt' )
-    dup      <<- fread( '/mnt/driveB/jdemeter/djscripts/data/pickles/dup_latest.txt' )
+    dup      <<- fread( dupFile )
     colnames(dup) <<- c('desc', 'eid', 'symbol', 'taxid')
     dup[, ref := ifelse(grepl(refseqre, desc), gsub(refseqre, '\\1', desc), NA)]
     dup[, sp := ifelse(grepl(uniprotre, tolower(desc)), gsub(uniprotre, '\\2', tolower(desc)), NA)]
@@ -1113,11 +1318,11 @@ create_summary_file <- function( dir, outfile ){
         print( paste0('Please, check the directory: ', dir))
         return()
     }
-    if(length(list.files(path = dir, pattern = '^[a-zA-Z1-9]+.*\\.xlsx$')) == 0){
+    if(length(list.files(path = dir, pattern = '^[a-zA-Z0-9]+.*\\.xlsx$')) == 0){
         print( paste( dir, 'contains no excel files'))
         return()
     }
-    ffiles <- list.files(path = dir, pattern = '^[a-zA-Z1-9]+.*\\.xlsx')
+    ffiles <- list.files(path = dir, pattern = '^[a-zA-Z0-9]+.*\\.xlsx')
     count  <- 1
     sum_data <- data.table()
     cnames <- c('Rank Number', 'Protein Name')
@@ -1180,3 +1385,6 @@ create_summary_file <- function( dir, outfile ){
 #args$map_descr <- data.table(type = 'map', from = '>pLAP7/Puro_p53_QM', to = '>pLAP7/Puro_p53')
 #makeDupMap()
 #makeSummary3(groups, outdir, args)
+#makeSummary3(zgroups, zoutdir, zargs)
+#pth <- '~/mnt/driveB/jdemeter/usr/R/'
+#makeSummary3(readRDS(paste0(pth, 'groups.rds')), pth, readRDS(paste0(pth, 'args.rds')))
